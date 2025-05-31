@@ -1,0 +1,38 @@
+# Load libraries
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+# Load datasets
+foster_data <- read.csv("norfolk_foster_care.csv")
+adoption_data <- read.csv("norfolk_adoptions.csv")
+
+# View structure
+str(foster_data)
+str(adoption_data)
+
+# Convert date columns if any
+foster_data$Date <- as.Date(foster_data$Date, format = "%Y-%m-%d")
+adoption_data$Date <- as.Date(adoption_data$Date, format = "%Y-%m-%d")
+
+# Convert categorical variables to factors
+foster_data <- foster_data %>%
+  mutate(
+    Gender = as.factor(Gender),
+    Race = as.factor(Race),
+    Placement_Type = as.factor(Placement_Type)
+  )
+
+adoption_data <- adoption_data %>%
+  mutate(
+    Gender = as.factor(Gender),
+    Race = as.factor(Race)
+  )
+
+# Handle missing values: example replacing empty strings with NA
+foster_data[foster_data == ""] <- NA
+adoption_data[adoption_data == ""] <- NA
+
+# Optionally impute or drop missing data based on your plan
+foster_data <- foster_data %>% drop_na()
+adoption_data <- adoption_data %>% drop_na()

@@ -1,0 +1,261 @@
+---
+title: "adoption"
+author: "jawwad_kiani"
+date: "2025-05-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(caret)
+library(randomForest)
+library(pROC)
+library(rpart)
+library(e1071)
+library(kknn)
+library(ggplot2)
+library(xgboost)
+library(rpart.plot)
+library(doParallel)
+
+# Enable parallel processing for faster tuning
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+# Load adoption data
+adoption_data <- read.csv("adoption.csv")
+
+# Clean column names: replace spaces with underscores
+names(adoption_data) <- gsub(" ", "_", names(adoption_data))
+
+# Create binary target Adopted (1 if Left_Through_Adoption > 0, else 0)
+adoption_data$Adopted <- ifelse(adoption_data$Left.Through.Adoption > 0, 1, 0)
+
+# Select features
+features <- c("Male", "Female", "Black", "White", "Hispanic", 
+              "Age.Under.1", "Age.1.Through.5", "Age.6.Through.9")
+
+# Filter and prepare data
+model_data <- adoption_data %>%
+  select(all_of(features), Adopted) %>%
+  filter(!is.na(Adopted)) %>%
+  na.omit()
+
+# Convert Adopted to factor with levels
+model_data$Adopted <- factor(model_data$Adopted, levels = c(0,1), labels = c("No", "Yes"))
+
+# Train-test split
+set.seed(123)
+train_index <- createDataPartition(model_data$Adopted, p = 0.7, list = FALSE)
+train <- model_data[train_index, ]
+test <- model_data[-train_index, ]
+
+# Preprocessing (center/scale for some models)
+preProc <- preProcess(train[, -ncol(train)], method = c("center", "scale"))
+train_scaled <- predict(preProc, train)
+test_scaled <- predict(preProc, test)
+
+# Set up repeated CV and tuning control
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE,
+  allowParallel = TRUE
+)
+
+# Decision Tree tuning grid
+dt_grid <- expand.grid(cp = seq(0.001, 0.05, by = 0.005))
+
+# KNN tuning grid (try a range of k)
+knn_grid <- expand.grid(kmax = seq(3, 15, 2), distance = 2, kernel = "rectangular")
+
+# XGBoost tuning grid (basic parameters)
+xgb_grid <- expand.grid(
+  nrounds = c(50, 100),
+  max_depth = c(3, 6),
+  eta = c(0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample = 0.8
+)
+
+# Train models
+
+set.seed(123)
+models <- list()
+
+# Logistic Regression (scaled data)
+models$glm <- train(
+  Adopted ~ ., data = train_scaled, method = "glm",
+  trControl = train_control, metric = "ROC"
+)
+
+# Random Forest (scaled data)
+models$rf <- train(
+  Adopted ~ ., data = train_scaled, method = "rf",
+  trControl = train_control, tuneLength = 5, metric = "ROC"
+)
+
+# Decision Tree (unscaled data) - tuned cp
+models$rpart <- train(
+  Adopted ~ ., data = train, method = "rpart",
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    allowParallel = TRUE
+  ),
+  tuneGrid = dt_grid,
+  metric = "ROC"
+)
+
+# KNN (scaled data)
+models$knn <- train(
+  Adopted ~ ., data = train_scaled, method = "kknn",
+  trControl = train_control, tuneGrid = knn_grid, metric = "ROC"
+)
+
+# XGBoost (scaled data)
+models$xgb <- train(
+  Adopted ~ ., data = train_scaled, method = "xgbTree",
+  trControl = train_control, tuneGrid = xgb_grid,
+  metric = "ROC"
+)
+```
+
+```{r include= FALSE}
+# Evaluate all models
+results <- data.frame(
+  Model = character(),
+  AUC = numeric(),
+  Accuracy = numeric(),
+  Sensitivity = numeric(),
+  Specificity = numeric(),
+  stringsAsFactors = FALSE
+)
+
+```
+
+```{r include= TRUE}
+for (model_name in names(models)) {
+  model <- models[[model_name]]
+  newdata <- if (model_name %in% c("rpart")) test else test_scaled
+  probs <- predict(model, newdata = newdata, type = "prob")[, "Yes"]
+  preds <- predict(model, newdata = newdata)
+  
+  roc_obj <- roc(newdata$Adopted, probs)
+  cm <- confusionMatrix(preds, newdata$Adopted, positive = "Yes")
+  
+  results <- rbind(results, data.frame(
+    Model = model_name,
+    AUC = auc(roc_obj),
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  ))
+  
+  plot(roc_obj, main = paste("ROC Curve -", model_name), col = "blue", lwd = 2)
+}
+results
+```
+
+```{r include= TRUE}
+# AUC Comparison Visualization
+model_labels <- c(glm = "Logistic Regression", rf = "Random Forest", 
+                  rpart = "Decision Tree", knn = "KNN", xgb = "XGBoost")
+
+model_metrics <- results %>%
+  mutate(Model = model_labels[Model]) %>%
+  arrange(desc(AUC))
+
+ggplot(model_metrics, aes(x = reorder(Model, AUC), y = AUC, fill = Model)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(AUC, 3)), vjust = -0.5) +
+  labs(title = "AUC Comparison Across Models", x = "Model", y = "AUC") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r include= TRUE}
+# Final Decision Tree Tuning on scaled data
+tune_grid <- expand.grid(cp = seq(0.001, 0.05, by = 0.005))
+
+set.seed(123)
+dt_tuned <- train(
+  Adopted ~ .,
+  data = train_scaled,
+  method = "rpart",
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary
+  ),
+  tuneGrid = tune_grid,
+  metric = "ROC"
+)
+
+print(dt_tuned)
+plot(dt_tuned)
+```
+
+```{r include= TRUE}
+# Prediction using Tuned Decision Tree
+dt_probs <- predict(dt_tuned, newdata = test_scaled, type = "prob")[, "Yes"]
+dt_preds <- predict(dt_tuned, newdata = test_scaled)
+confusionMatrix(dt_preds, test_scaled$Adopted, positive = "Yes")
+
+# ROC and AUC
+dt_roc <- roc(test_scaled$Adopted, dt_probs, levels = c("No", "Yes"), direction = "<")
+plot(dt_roc, main = "ROC Curve - Tuned Decision Tree", col = "darkred", lwd = 2)
+cat("AUC - Tuned Decision Tree:", auc(dt_roc), "\n")
+```
+
+```{r include= TRUE}
+# Visualize the final tuned decision tree
+rpart.plot(dt_tuned$finalModel, type = 2, extra = 104,
+           fallen.leaves = TRUE, main = "Final Tuned Decision Tree")
+```
+
+
+### 🧾 Final Model Evaluation Summary (Tuned Decision Tree)
+
+**Confusion Matrix:**
+```
+            Reference
+Prediction   No  Yes
+        No   16   9
+        Yes   7  18
+```
+
+**Performance Metrics:**
+- **Accuracy:** 0.68  
+- **95% Confidence Interval for Accuracy:** (0.533, 0.8048)  
+- **No Information Rate:** 0.54  
+- **P-Value [Acc > NIR]:** 0.03133  
+- **Kappa:** 0.36  
+- **Mcnemar's Test P-Value:** 0.80259  
+
+**Class-wise Metrics:**
+- **Sensitivity (Recall for Positive Class):** 0.6667  
+- **Specificity (Recall for Negative Class):** 0.6957  
+- **Positive Predictive Value (Precision for Yes):** 0.7200  
+- **Negative Predictive Value:** 0.6400  
+- **Balanced Accuracy:** 0.6812  
+
+**AUC (Area Under ROC Curve):** 0.7303
+
+---
+
+### 🧠 Interpretation:
+
+-  **Tuned Decision Tree** model achieves **moderate performance** with an **AUC of 0.73**, which indicates fair discrimination between "Adopted" and "Not Adopted" cases.
+- **Accuracy** is **68%**, which is significantly better than random guessing (NIR = 54%).
+- The **Kappa score** of **0.36** indicates a fair level of agreement between predictions and actual outcomes.
+- The model shows **balanced sensitivity and specificity**, meaning it handles both classes reasonably well.
+- **P-value < 0.05** for accuracy above NIR suggests that the model is statistically better than baseline.
