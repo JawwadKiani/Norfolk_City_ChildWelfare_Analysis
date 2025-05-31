@@ -4,7 +4,7 @@ This project performs predictive modeling on Norfolk City's child welfare data t
 
 ## 📁 Dataset
 
-The dataset used (`adoption.csv`) contains aggregated counts of children in different demographic groups along with adoption outcomes. Key features include:
+The dataset used (`adoption.csv`) and (`Foster_Care.csv`) contains aggregated counts of children in different demographic groups along with adoption and foster care outcomes. Key features include:
 
 - **Demographics**: `Male`, `Female`, `Black`, `White`, `Hispanic`
 - **Age Groups**: `Age.Under.1`, `Age.1.Through.5`, `Age.6.Through.9`
